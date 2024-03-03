@@ -1,0 +1,16 @@
+FROM python:3.11-slim
+
+# Set working directory in the container
+WORKDIR /app
+
+# Copy dependencies file to working directory
+COPY requirements.txt .
+
+# Install dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy src directory to working directory
+COPY . .
+
+# run gunicorn on start
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "app:app"]
