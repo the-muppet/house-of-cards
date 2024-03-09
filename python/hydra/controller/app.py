@@ -27,5 +27,19 @@ def start_workflow():
         logging.error(f"Error in start_workflow: {e}")
         return jsonify({"error": "Internal Server Error"}), 500
 
+
+@app.route("/resend", methods=["POST"])
+def retry_workflow():
+    try:
+        data = request.json
+        failed_ids = data.get('failed_ids')
+    
+        if not failed_ids:
+            return jsonify({"error": "No failed IDs provided"}), 400
+        
+        tcg_ids = failed_ids
+    publish_batch(failed_ids, data.get('url'))
+    
+    return jsonify({"status": "Retry initiated for failed IDs", "count": len(failed_ids)})
 if __name__ == "__main__":
     app.run(debug=True)
