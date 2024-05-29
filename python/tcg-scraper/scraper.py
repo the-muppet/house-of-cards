@@ -24,29 +24,29 @@ PROJECT_ID = os.getenv("PROJECT_ID")
 BASE_URL = "http://www.tcgplayer.com"
 seen_sellers = set()
 
-def create_bq_client():
+def create_bq_client(PROJECT_ID):
     """Creates a BigQuery client."""
     return bigquery.Client(project=PROJECT_ID)
 
-async def create_dataset(client, dataset_id):
+async def create_dataset(bq_client, dataset_id):
     """Creates a BigQuery dataset if it doesn't exist."""
-    dataset_ref = client.dataset(dataset_id)
+    dataset_ref = bq_client.dataset(dataset_id)
     try:
-        client.get_dataset(dataset_ref)
+        bq_client.get_dataset(dataset_ref)
         logging.info(f"Dataset {dataset_id} already exists.")
     except Exception as e:
         try:
-            client.create_dataset(dataset_ref)
+            bq_client.create_dataset(dataset_ref)
             logging.info(f"Created dataset {dataset_id}.")
         except Exception as e:
             logging.error(f"Error creating dataset {dataset_id}: {e}")
 
 
-async def create_dataset_tables(client, dataset_id):
+async def create_dataset_tables(bq_client, dataset_id):
     """Creates BigQuery tables for the given dataset."""
     
     def create_table(table_id, schema, partition_by=None):
-        table_ref = client.dataset(dataset_id).table(table_id)
+        table_ref = bq_client.dataset(dataset_id).table(table_id)
         try:
             time_partitioning = bigquery.TimePartitioning(
                 type_=bigquery.TimePartitioningType.DAY,
@@ -54,7 +54,7 @@ async def create_dataset_tables(client, dataset_id):
             ) if partition_by else None
 
             table = bigquery.Table(table_ref, schema=schema, time_partitioning=time_partitioning)
-            client.create_table(table)
+            bq_client.create_table(table)
             logging.info(f"Created table {table_id} in dataset {dataset_id}.")
         except Exception as e:
             logging.error(f"Error creating table {table_id}: {e}")
@@ -120,11 +120,11 @@ async def create_dataset_tables(client, dataset_id):
     create_table("listings", listings_schema, partition_by="listing_date")
     create_table("sellers", sellers_schema, partition_by="last_updated")
 
-async def stream_to_bigquery(client, data, table_id, dataset_id):
+async def stream_to_bigquery(bq_client, data, table_id, dataset_id):
     """Streams data to BQ (partitioned by date)."""
-    table_ref = client.dataset(dataset_id).table(table_id)
+    table_ref = bq_client.dataset(dataset_id).table(table_id)
     try:
-        errors = client.insert_rows_json(table_ref, data)
+        errors = bq_client.insert_rows_json(table_ref, data)
         if errors:
             logging.error(f"Errors inserting rows into {table_id}: {errors}")
     except Exception as e:
@@ -468,7 +468,7 @@ async def write_data(data_queue, product_file_name, listing_file_name, seller_fi
         data_queue.task_done()
 
 
-async def scrape_category(client, category, workers=50, session=None):
+async def scrape_category(bq_client, category, workers=50, session=None):
     """Scrapes product details for a selected category."""
     try:
         category_name = category["Category"]
@@ -476,8 +476,8 @@ async def scrape_category(client, category, workers=50, session=None):
         logging.info(f"Scraping category: {category_name}" + f" to dataset: {dataset_id}")
 
         # Create BigQuery Dataset and Tables
-        await create_dataset(client, dataset_id)
-        await create_dataset_tables(client, dataset_id)
+        await create_dataset(bq_client, dataset_id)
+        await create_dataset_tables(bq_client, dataset_id)
 
         # Create Category Folder
         category_folder = category_name
@@ -523,6 +523,18 @@ async def scrape_category(client, category, workers=50, session=None):
     except Exception as e:
         logging.error(f"Error scraping category: {e}")
         return
+    
+async def create_tables_from_file(bq_client, category_name):
+    """Creates tables from SQL statements in a file, dynamically using the category name."""
+    try:
+        with open(os.getenv("SQL_FILE"), "r") as f:
+            sql_statements = f.read()
+        sql_statements = sql_statements.format(category_name=category_name)
+        query_job = bq_client.query(sql_statements)
+        query_job.result()
+        logging.info(f"Tables created successfully for category: {category_name}")
+    except Exception as e:
+        logging.error(f"Error creating tables: {e}")
 
 
 async def main(search_term, workers=50):
@@ -535,10 +547,14 @@ async def main(search_term, workers=50):
     parser.add_argument(
         "workers", type=int, default=10, help="Number of concurrent workers to use"
     )
-    args = parser.parse_args()
     logging.info("Starting scraper")
+    args = parser.parse_args()
 
+    bq_client = create_bq_client(PROJECT_ID)
     category_name = args.category_name.lower()
+    logging.info(f"Scraping category: {category_name}")
+    
+    await create_tables_from_file(bq_client, category_name) 
     try:
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=100)) as client:
             categories = await fetch_and_parse_categories_from_sitemap(
