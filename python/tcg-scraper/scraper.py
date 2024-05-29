@@ -43,6 +43,76 @@ async def create_dataset(client, dataset_id):
             logging.error(f"Error creating dataset {dataset_id}: {e}")
 
 
+async def create_dataset_tables(client, dataset_id):
+    """Creates BigQuery tables for the given dataset."""
+    def create_table(table_id, schema):
+        table_ref = client.dataset(dataset_id).table(table_id)
+        try:
+            table = bigquery.Table(table_ref, schema=schema)
+            client.create_table(table)
+            logging.info(f"Created table {table_id} in dataset {dataset_id}.")
+        except Exception as e:
+            logging.error(f"Error creating table {table_id}: {e}")
+        
+    products_schema = [
+        bigquery.SchemaField("product_id", "INTEGER", mode="NULLABLE"),
+        bigquery.SchemaField("totalResults", "INTEGER", mode="NULLABLE"),
+        bigquery.SchemaField(
+            "conditions",
+            "RECORD",
+            mode="REPEATED",
+            fields=[
+                bigquery.SchemaField("value", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("count", "INTEGER", mode="NULLABLE"),
+            ],
+        ),
+        bigquery.SchemaField(
+            "listingTypes",
+            "RECORD",
+            mode="REPEATED",
+            fields=[
+                bigquery.SchemaField("value", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("count", "INTEGER", mode="NULLABLE"),
+            ],
+        ),
+        bigquery.SchemaField(
+            "printings",
+            "RECORD",
+            mode="REPEATED",
+            fields=[
+                bigquery.SchemaField("value", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("count", "INTEGER", mode="NULLABLE"),
+            ],
+        ),
+    ]
+
+    listings_schema = [
+        bigquery.SchemaField("product_id", "INTEGER", mode="NULLABLE"),
+        bigquery.SchemaField("seller_key", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("tcg_id", "INTEGER", mode="NULLABLE"),
+        bigquery.SchemaField("printing", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("condition", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("direct_quantity", "INTEGER", mode="NULLABLE"),
+        bigquery.SchemaField("quantity", "INTEGER", mode="NULLABLE"),
+        bigquery.SchemaField("price", "FLOAT", mode="NULLABLE"),
+        bigquery.SchemaField("shipping_price", "FLOAT", mode="NULLABLE"),
+        bigquery.SchemaField("listing_date", "DATE", mode="NULLABLE")
+    ]
+
+    sellers_schema = [
+        bigquery.SchemaField("seller_key", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("seller_id", "INTEGER", mode="NULLABLE"),
+        bigquery.SchemaField("seller_name", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("seller_rating", "FLOAT", mode="NULLABLE"),
+        bigquery.SchemaField("seller_sales", "INTEGER", mode="NULLABLE"),
+        bigquery.SchemaField("verified", "BOOLEAN", mode="NULLABLE"),
+        bigquery.SchemaField("gold_star", "BOOLEAN", mode="NULLABLE"),
+    ]
+
+    create_table("products", products_schema)
+    create_table("listings", listings_schema)
+    create_table("sellers", sellers_schema)
+
 async def fetch_sitemap(url):
     """Fetch the XML sitemap from the given URL."""
     try:
