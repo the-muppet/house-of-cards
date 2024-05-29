@@ -123,6 +123,40 @@ async def stream_to_bigquery(client, data, table_id, dataset_id):
     except Exception as e:
         logging.error(f"Error streaming data to BigQuery: {e}")
 
+async def write_to_bigquery(data_queue, product_file_name, listing_file_name, seller_file_name, dataset_id):
+    """Streams data to BigQuery tables."""
+    while True:
+        product_data, listing_data, seller_data = await data_queue.get()
+        current_date = date.today().strftime("%Y-%m-%d")
+
+        if product_data:
+            async with aiofiles.open(product_file_name, "a", encoding="utf-8") as product_file:
+                await product_file.write(json.dumps(product_data) + "\n")
+            await stream_to_bigquery([product_data], "products", dataset_id)
+
+        if listing_data:
+            listings_data_bq = [
+                {**listing, "listing_date": current_date}
+                for listing in listing_data
+            ]
+            async with aiofiles.open(
+                listing_file_name, "a", encoding="utf-8"
+            ) as listing_file:
+                for listing in listings_data_bq:
+                    await listing_file.write(json.dumps(listing) + "\n")
+            await stream_to_bigquery(listings_data_bq, "listings", dataset_id)
+
+        if seller_data:
+            async with aiofiles.open(
+                seller_file_name, "a", encoding="utf-8"
+            ) as seller_file:
+                for seller in seller_data.values():
+                    await seller_file.write(json.dumps(seller) + "\n")
+            await stream_to_bigquery(
+                list(seller_data.values()), "sellers", dataset_id
+            )
+
+        data_queue.task_done()
 async def fetch_sitemap(url):
     """Fetch the XML sitemap from the given URL."""
     try:
