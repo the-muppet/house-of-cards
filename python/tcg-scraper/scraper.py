@@ -157,6 +157,8 @@ async def write_to_bigquery(data_queue, product_file_name, listing_file_name, se
             )
 
         data_queue.task_done()
+
+
 async def fetch_sitemap(url):
     """Fetch the XML sitemap from the given URL."""
     try:
@@ -458,24 +460,6 @@ async def write_data(data_queue, product_file_name, listing_file_name, seller_fi
 
         data_queue.task_done()
 
-
-async def write_data(data_queue, product_file_name, listing_file_name, seller_file_name):
-    while True:
-        product_data, listing_data, seller_data_dict = await data_queue.get()
-        if product_data:
-            async with aiofiles.open(product_file_name, "a", encoding="utf-8") as product_file:
-                await product_file.write(json.dumps(product_data) + "\n")
-
-        if listing_data:
-            async with aiofiles.open(listing_file_name, "a", encoding="utf-8") as listing_file:
-                for listing in listing_data:
-                    await listing_file.write(json.dumps(listing) + "\n")
-
-        if seller_data_dict is not None:
-            async with aiofiles.open(seller_file_name, "a", encoding="utf-8") as seller_file:
-                for seller in seller_data_dict.values():
-                    await seller_file.write(json.dumps(seller) + "\n")
-        data_queue.task_done()
 
 async def scrape_category(category, workers=50, session=None):
     """Scrapes product details for a selected category."""
