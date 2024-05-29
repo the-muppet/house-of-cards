@@ -8,9 +8,11 @@ import argparse
 import aiofiles
 from tqdm import tqdm
 import logging.handlers
+from datetime import date
 from fuzzywuzzy import process
-from asyncio import Queue, Semaphore, sleep
+from google.cloud import bigquery
 import xml.etree.ElementTree as ET
+from asyncio import Queue, Semaphore, sleep
 
 # Set up logging
 logging.basicConfig(
@@ -18,8 +20,28 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 
+PROJECT_ID = os.getenv("PROJECT_ID")
+BASE_DATASET_ID = os.getenv("BASE_DATASET_ID")
 BASE_URL = "http://www.tcgplayer.com"
 seen_sellers = set()
+
+def create_bq_client():
+    """Creates a BigQuery client."""
+    return bigquery.Client(project=PROJECT_ID)
+
+async def create_dataset(client, dataset_id):
+    """Creates a BigQuery dataset if it doesn't exist."""
+    dataset_ref = client.dataset(dataset_id)
+    try:
+        client.get_dataset(dataset_ref)
+        logging.info(f"Dataset {dataset_id} already exists.")
+    except Exception as e:
+        try:
+            client.create_dataset(dataset_ref)
+            logging.info(f"Created dataset {dataset_id}.")
+        except Exception as e:
+            logging.error(f"Error creating dataset {dataset_id}: {e}")
+
 
 async def fetch_sitemap(url):
     """Fetch the XML sitemap from the given URL."""
