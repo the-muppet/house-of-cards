@@ -21,7 +21,6 @@ logging.basicConfig(
 )
 
 PROJECT_ID = os.getenv("PROJECT_ID")
-BASE_DATASET_ID = os.getenv("BASE_DATASET_ID")
 BASE_URL = "http://www.tcgplayer.com"
 seen_sellers = set()
 
@@ -45,10 +44,16 @@ async def create_dataset(client, dataset_id):
 
 async def create_dataset_tables(client, dataset_id):
     """Creates BigQuery tables for the given dataset."""
-    def create_table(table_id, schema):
+    
+    def create_table(table_id, schema, partition_by=None):
         table_ref = client.dataset(dataset_id).table(table_id)
         try:
-            table = bigquery.Table(table_ref, schema=schema)
+            time_partitioning = bigquery.TimePartitioning(
+                type_=bigquery.TimePartitioningType.DAY,
+                field=partition_by
+            ) if partition_by else None
+
+            table = bigquery.Table(table_ref, schema=schema, time_partitioning=time_partitioning)
             client.create_table(table)
             logging.info(f"Created table {table_id} in dataset {dataset_id}.")
         except Exception as e:
@@ -84,12 +89,13 @@ async def create_dataset_tables(client, dataset_id):
                 bigquery.SchemaField("count", "INTEGER", mode="NULLABLE"),
             ],
         ),
+        bigquery.SchemaField("last_updated", "TIMESTAMP", mode="NULLABLE")
     ]
 
     listings_schema = [
         bigquery.SchemaField("product_id", "INTEGER", mode="NULLABLE"),
         bigquery.SchemaField("seller_key", "STRING", mode="NULLABLE"),
-        bigquery.SchemaField("tcg_id", "INTEGER", mode="NULLABLE"),
+        bigquery.SchemaField("tcg_id", "STRING", mode="NULLABLE"),
         bigquery.SchemaField("printing", "STRING", mode="NULLABLE"),
         bigquery.SchemaField("condition", "STRING", mode="NULLABLE"),
         bigquery.SchemaField("direct_quantity", "INTEGER", mode="NULLABLE"),
@@ -107,11 +113,12 @@ async def create_dataset_tables(client, dataset_id):
         bigquery.SchemaField("seller_sales", "INTEGER", mode="NULLABLE"),
         bigquery.SchemaField("verified", "BOOLEAN", mode="NULLABLE"),
         bigquery.SchemaField("gold_star", "BOOLEAN", mode="NULLABLE"),
+        bigquery.SchemaField("last_updated", "TIMESTAMP", mode="NULLABLE")
     ]
 
-    create_table("products", products_schema)
-    create_table("listings", listings_schema)
-    create_table("sellers", sellers_schema)
+    create_table("products", products_schema, partition_by="last_updated")
+    create_table("listings", listings_schema, partition_by="listing_date")
+    create_table("sellers", sellers_schema, partition_by="last_updated")
 
 async def stream_to_bigquery(client, data, table_id, dataset_id):
     """Streams data to BQ (partitioned by date)."""
