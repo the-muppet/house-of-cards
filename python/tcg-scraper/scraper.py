@@ -113,6 +113,16 @@ async def create_dataset_tables(client, dataset_id):
     create_table("listings", listings_schema)
     create_table("sellers", sellers_schema)
 
+async def stream_to_bigquery(client, data, table_id, dataset_id):
+    """Streams data to BQ (partitioned by date)."""
+    table_ref = client.dataset(dataset_id).table(table_id)
+    try:
+        errors = client.insert_rows_json(table_ref, data)
+        if errors:
+            logging.error(f"Errors inserting rows into {table_id}: {errors}")
+    except Exception as e:
+        logging.error(f"Error streaming data to BigQuery: {e}")
+
 async def fetch_sitemap(url):
     """Fetch the XML sitemap from the given URL."""
     try:
