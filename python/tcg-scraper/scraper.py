@@ -461,18 +461,23 @@ async def write_data(data_queue, product_file_name, listing_file_name, seller_fi
         data_queue.task_done()
 
 
-async def scrape_category(category, workers=50, session=None):
+async def scrape_category(client, category, workers=50, session=None):
     """Scrapes product details for a selected category."""
     try:
         category_name = category["Category"]
-        logging.info(f"Scraping category: {category_name}")
+        dataset_id = f"{category_name.lower().replace('-', '_')}_data"
+        logging.info(f"Scraping category: {category_name}" + f" to dataset: {dataset_id}")
 
-        # 1. Create Category Folder
+        # Create BigQuery Dataset and Tables
+        await create_dataset(client, dataset_id)
+        await create_dataset_tables(client, dataset_id)
+
+        # Create Category Folder
         category_folder = category_name
         os.makedirs(category_folder, exist_ok=True)
         logging.info(f"Created category folder: {category_folder}")
 
-        # 2. Fetch and Save Category Sitemap
+        # Fetch and Save Category Sitemap
         category_sitemap_filename = os.path.join(
             category_folder, f"{category_name}_sitemap.xml"
         )
@@ -491,7 +496,7 @@ async def scrape_category(category, workers=50, session=None):
             logging.error(f"Error fetching/saving category sitemap: {e}")
             return
 
-        # 3. Extract and Save Product IDs
+        # Extract and Save Product IDs
         product_ids = extract_product_ids(category_sitemap_content)
         if not product_ids:
             logging.error(f"No product IDs found in: {category_sitemap_filename}")
@@ -505,7 +510,7 @@ async def scrape_category(category, workers=50, session=None):
             logging.error(f"Error saving product IDs: {e}")
             return
 
-        # 4. Fetch and Write Product Data
+        # Fetch and Write Product Data
         await fetch_and_write_product_data(product_ids, category_name, category_folder, workers=50, session=session)
 
     except Exception as e:
