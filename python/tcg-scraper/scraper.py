@@ -8,9 +8,11 @@ import argparse
 import aiofiles
 from tqdm import tqdm
 import logging.handlers
+from datetime import date
 from fuzzywuzzy import process
-from asyncio import Queue, Semaphore, sleep
+from google.cloud import bigquery
 import xml.etree.ElementTree as ET
+from asyncio import Queue, Semaphore, sleep
 
 # Set up logging
 logging.basicConfig(
@@ -18,8 +20,151 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 
+PROJECT_ID = os.getenv("PROJECT_ID")
 BASE_URL = "http://www.tcgplayer.com"
 seen_sellers = set()
+
+def create_bq_client(PROJECT_ID):
+    """Creates a BigQuery client."""
+    return bigquery.Client(project=PROJECT_ID)
+
+async def create_dataset(bq_client, dataset_id):
+    """Creates a BigQuery dataset if it doesn't exist."""
+    dataset_ref = bq_client.dataset(dataset_id)
+    try:
+        bq_client.get_dataset(dataset_ref)
+        logging.info(f"Dataset {dataset_id} already exists.")
+    except Exception as e:
+        try:
+            bq_client.create_dataset(dataset_ref)
+            logging.info(f"Created dataset {dataset_id}.")
+        except Exception as e:
+            logging.error(f"Error creating dataset {dataset_id}: {e}")
+
+
+async def create_dataset_tables(bq_client, dataset_id):
+    """Creates BigQuery tables for the given dataset."""
+    
+    def create_table(table_id, schema, partition_by=None):
+        table_ref = bq_client.dataset(dataset_id).table(table_id)
+        try:
+            time_partitioning = bigquery.TimePartitioning(
+                type_=bigquery.TimePartitioningType.DAY,
+                field=partition_by
+            ) if partition_by else None
+
+            table = bigquery.Table(table_ref, schema=schema, time_partitioning=time_partitioning)
+            bq_client.create_table(table)
+            logging.info(f"Created table {table_id} in dataset {dataset_id}.")
+        except Exception as e:
+            logging.error(f"Error creating table {table_id}: {e}")
+        
+    products_schema = [
+        bigquery.SchemaField("product_id", "INTEGER", mode="NULLABLE"),
+        bigquery.SchemaField("totalResults", "INTEGER", mode="NULLABLE"),
+        bigquery.SchemaField(
+            "conditions",
+            "RECORD",
+            mode="REPEATED",
+            fields=[
+                bigquery.SchemaField("value", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("count", "INTEGER", mode="NULLABLE"),
+            ],
+        ),
+        bigquery.SchemaField(
+            "listingTypes",
+            "RECORD",
+            mode="REPEATED",
+            fields=[
+                bigquery.SchemaField("value", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("count", "INTEGER", mode="NULLABLE"),
+            ],
+        ),
+        bigquery.SchemaField(
+            "printings",
+            "RECORD",
+            mode="REPEATED",
+            fields=[
+                bigquery.SchemaField("value", "STRING", mode="NULLABLE"),
+                bigquery.SchemaField("count", "INTEGER", mode="NULLABLE"),
+            ],
+        ),
+        bigquery.SchemaField("last_updated", "TIMESTAMP", mode="NULLABLE")
+    ]
+
+    listings_schema = [
+        bigquery.SchemaField("product_id", "INTEGER", mode="NULLABLE"),
+        bigquery.SchemaField("seller_key", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("tcg_id", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("printing", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("condition", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("direct_quantity", "INTEGER", mode="NULLABLE"),
+        bigquery.SchemaField("quantity", "INTEGER", mode="NULLABLE"),
+        bigquery.SchemaField("price", "FLOAT", mode="NULLABLE"),
+        bigquery.SchemaField("shipping_price", "FLOAT", mode="NULLABLE"),
+        bigquery.SchemaField("listing_date", "DATE", mode="NULLABLE")
+    ]
+
+    sellers_schema = [
+        bigquery.SchemaField("seller_key", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("seller_id", "INTEGER", mode="NULLABLE"),
+        bigquery.SchemaField("seller_name", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("seller_rating", "FLOAT", mode="NULLABLE"),
+        bigquery.SchemaField("seller_sales", "INTEGER", mode="NULLABLE"),
+        bigquery.SchemaField("verified", "BOOLEAN", mode="NULLABLE"),
+        bigquery.SchemaField("gold_star", "BOOLEAN", mode="NULLABLE"),
+        bigquery.SchemaField("last_updated", "TIMESTAMP", mode="NULLABLE")
+    ]
+
+    create_table("products", products_schema, partition_by="last_updated")
+    create_table("listings", listings_schema, partition_by="listing_date")
+    create_table("sellers", sellers_schema, partition_by="last_updated")
+
+async def stream_to_bigquery(bq_client, data, table_id, dataset_id):
+    """Streams data to BQ (partitioned by date)."""
+    table_ref = bq_client.dataset(dataset_id).table(table_id)
+    try:
+        errors = bq_client.insert_rows_json(table_ref, data)
+        if errors:
+            logging.error(f"Errors inserting rows into {table_id}: {errors}")
+    except Exception as e:
+        logging.error(f"Error streaming data to BigQuery: {e}")
+
+async def write_to_bigquery(data_queue, product_file_name, listing_file_name, seller_file_name, dataset_id):
+    """Streams data to BigQuery tables."""
+    while True:
+        product_data, listing_data, seller_data = await data_queue.get()
+        current_date = date.today().strftime("%Y-%m-%d")
+
+        if product_data:
+            async with aiofiles.open(product_file_name, "a", encoding="utf-8") as product_file:
+                await product_file.write(json.dumps(product_data) + "\n")
+            await stream_to_bigquery([product_data], "products", dataset_id)
+
+        if listing_data:
+            listings_data_bq = [
+                {**listing, "listing_date": current_date}
+                for listing in listing_data
+            ]
+            async with aiofiles.open(
+                listing_file_name, "a", encoding="utf-8"
+            ) as listing_file:
+                for listing in listings_data_bq:
+                    await listing_file.write(json.dumps(listing) + "\n")
+            await stream_to_bigquery(listings_data_bq, "listings", dataset_id)
+
+        if seller_data:
+            async with aiofiles.open(
+                seller_file_name, "a", encoding="utf-8"
+            ) as seller_file:
+                for seller in seller_data.values():
+                    await seller_file.write(json.dumps(seller) + "\n")
+            await stream_to_bigquery(
+                list(seller_data.values()), "sellers", dataset_id
+            )
+
+        data_queue.task_done()
+
 
 async def fetch_sitemap(url):
     """Fetch the XML sitemap from the given URL."""
@@ -323,36 +468,23 @@ async def write_data(data_queue, product_file_name, listing_file_name, seller_fi
         data_queue.task_done()
 
 
-async def write_data(data_queue, product_file_name, listing_file_name, seller_file_name):
-    while True:
-        product_data, listing_data, seller_data_dict = await data_queue.get()
-        if product_data:
-            async with aiofiles.open(product_file_name, "a", encoding="utf-8") as product_file:
-                await product_file.write(json.dumps(product_data) + "\n")
-
-        if listing_data:
-            async with aiofiles.open(listing_file_name, "a", encoding="utf-8") as listing_file:
-                for listing in listing_data:
-                    await listing_file.write(json.dumps(listing) + "\n")
-
-        if seller_data_dict is not None:
-            async with aiofiles.open(seller_file_name, "a", encoding="utf-8") as seller_file:
-                for seller in seller_data_dict.values():
-                    await seller_file.write(json.dumps(seller) + "\n")
-        data_queue.task_done()
-
-async def scrape_category(category, workers=50, session=None):
+async def scrape_category(bq_client, category, workers=50, session=None):
     """Scrapes product details for a selected category."""
     try:
         category_name = category["Category"]
-        logging.info(f"Scraping category: {category_name}")
+        dataset_id = f"{category_name.lower().replace('-', '_')}_data"
+        logging.info(f"Scraping category: {category_name}" + f" to dataset: {dataset_id}")
 
-        # 1. Create Category Folder
+        # Create BigQuery Dataset and Tables
+        await create_dataset(bq_client, dataset_id)
+        await create_dataset_tables(bq_client, dataset_id)
+
+        # Create Category Folder
         category_folder = category_name
         os.makedirs(category_folder, exist_ok=True)
         logging.info(f"Created category folder: {category_folder}")
 
-        # 2. Fetch and Save Category Sitemap
+        # Fetch and Save Category Sitemap
         category_sitemap_filename = os.path.join(
             category_folder, f"{category_name}_sitemap.xml"
         )
@@ -371,7 +503,7 @@ async def scrape_category(category, workers=50, session=None):
             logging.error(f"Error fetching/saving category sitemap: {e}")
             return
 
-        # 3. Extract and Save Product IDs
+        # Extract and Save Product IDs
         product_ids = extract_product_ids(category_sitemap_content)
         if not product_ids:
             logging.error(f"No product IDs found in: {category_sitemap_filename}")
@@ -385,12 +517,24 @@ async def scrape_category(category, workers=50, session=None):
             logging.error(f"Error saving product IDs: {e}")
             return
 
-        # 4. Fetch and Write Product Data
+        # Fetch and Write Product Data
         await fetch_and_write_product_data(product_ids, category_name, category_folder, workers=50, session=session)
 
     except Exception as e:
         logging.error(f"Error scraping category: {e}")
         return
+    
+async def create_tables_from_file(bq_client, category_name):
+    """Creates tables from SQL statements in a file, dynamically using the category name."""
+    try:
+        with open(os.getenv("SQL_FILE"), "r") as f:
+            sql_statements = f.read()
+        sql_statements = sql_statements.format(category_name=category_name)
+        query_job = bq_client.query(sql_statements)
+        query_job.result()
+        logging.info(f"Tables created successfully for category: {category_name}")
+    except Exception as e:
+        logging.error(f"Error creating tables: {e}")
 
 
 async def main(search_term, workers=50):
@@ -403,9 +547,14 @@ async def main(search_term, workers=50):
     parser.add_argument(
         "workers", type=int, default=10, help="Number of concurrent workers to use"
     )
-    args = parser.parse_args()
     logging.info("Starting scraper")
+    args = parser.parse_args()
 
+    bq_client = create_bq_client(PROJECT_ID)
+    category_name = args.category_name.lower()
+    logging.info(f"Scraping category: {category_name}")
+    
+    await create_tables_from_file(bq_client, category_name) 
     try:
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=100)) as client:
             categories = await fetch_and_parse_categories_from_sitemap(
