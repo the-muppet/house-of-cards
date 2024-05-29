@@ -538,6 +538,7 @@ async def main(search_term, workers=50):
     args = parser.parse_args()
     logging.info("Starting scraper")
 
+    category_name = args.category_name.lower()
     try:
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=100)) as client:
             categories = await fetch_and_parse_categories_from_sitemap(
