@@ -1,6 +1,3 @@
-
-
-
 CREATE TABLE `{project_id}.{category_name}.product_change_history` (
     change_date DATE,
     product_id INT64,
