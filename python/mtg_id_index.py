@@ -1,11 +1,16 @@
 import json
 import lzma
 import uuid
+import logging
 import requests
 import tempfile
 import argparse
 import pandas as pd
 from uuid import UUID
+from typing import Optional
+from dataclasses import dataclass, field
+
+logging.basicConfig(filename='mtg_index.log', level=logging.ERROR)
 
 
 def parse_arguments():
@@ -36,18 +41,16 @@ class UUIDEncoder(json.JSONEncoder):
             return str(obj)
         return json.JSONEncoder.default(self, obj)
 
-
+@dataclass
 class Config:
-    def __init__(self):
-        self.save_csv = False
-        self.csv_filename = "mtg_index.csv"
-        self.save_bq = False
-        self.bq_dest = ""
-        self.save_jsonl = False
-        self.jsonl_filename = "mtg_index.jsonl"
-        self.use_adc = True
-        self.service_acc_path = ""
-
+    save_csv: bool = False
+    csv_filename: Optional[str] = field(default_factory=lambda: "mtg_index.csv")
+    save_bq: bool = False
+    bq_dest: str = ""
+    save_jsonl: bool = False
+    jsonl_filename: Optional[str] = field(default_factory=lambda: "mtg_index.jsonl")
+    use_adc: bool = True
+    service_acc_path: str = ""
 
 class MtgIdManager:
     def __init__(self, urls):
@@ -73,18 +76,23 @@ class MtgIdManager:
     def process_sku_data(self):
         print("Processing SKUs...")
         sku_data = self.json_data[0]["data"]
-        self.sku_list = [
-            {
-                "skuId": sub_item["skuId"],
-                "productId": sub_item["productId"],
-                "condition": sub_item["condition"],
-                "printing": sub_item["printing"],
-                "language": sub_item["language"],
-            }
-            for item_list in sku_data.values()
-            for sub_item in item_list
-        ]
-
+        self.sku_list = []
+        try:
+            for item_list in sku_data.values():
+                for sub_item in item_list:
+                    sku_item = {
+                        "skuId": sub_item["skuId"],
+                        "productId": sub_item["productId"],
+                        "condition": sub_item["condition"],
+                        "printing": sub_item["printing"],
+                        "language": sub_item["language"],
+                    }
+                    self.sku_list.append(sku_item)
+        except KeyError as e:
+            logging.error(f"Error processing SKU data: {e}")
+        except TypeError as e:
+            logging.error(f"Error processing SKU data: {e}")
+            
     def process_identifiers_data(self):
         print("Processing identifiers..")
         self.identifiers_data = self.json_data[1]["data"]
@@ -102,11 +110,15 @@ class MtgIdManager:
                     "setCode": entry.get("setCode", ""),
                     "name": entry.get("name", ""),
                     "tcgplayerProductId": entry.get("tcgplayerProductId", ""),
-                    "scryfallId": entry.get("identifiers", {}).get("scryfallId", ""),
+                    "scryfallId": entry.get("identifiers", {}).get("scryfallId", None) if "scryfallId" in entry.get("identifiers", {}) else None,
                     **entry.get("identifiers", {}),
                 }
                 for uuid, entry in self.identifiers_data.items()
             ]
+        )
+
+        id_df['scryfallId'] = id_df['scryfallId'].apply(
+            lambda x: str(uuid.UUID(x)) if isinstance(x, str) and uuid.UUID(x) else None
         )
 
         name_mapping = {item["code"]: item["name"] for item in self.set_data}
@@ -123,14 +135,18 @@ class MtgIdManager:
             ids, id_df, left_on="productId", right_on="tcgplayerProductId", how="left"
         )
 
+        self.joined_df.drop_duplicates(
+            subset=["skuId", "condition", "language", "printing"],
+            keep="first",
+            inplace=True
+        )
+
     @staticmethod
     def compute_sku(
-        scryfall_id: uuid.UUID, condition: str, language: str, printing: str
+        scryfall_id: str, condition: str, language: str, printing: str
     ) -> tuple[uuid.UUID, str | None]:
-        try:
-            scryfall_namespace = uuid.UUID(scryfall_id)
-        except ValueError as err:
-            return None, f"Invalid scryfall id: {err}"
+        
+        scryfall_namespace = uuid.UUID(scryfall_id)
 
         conditions = {
             "nm": ["near mint", "NM", "nm"],
@@ -153,30 +169,42 @@ class MtgIdManager:
             name += "foil"
         else:
             name += "nonfoil"
-        
         sku_uuid = uuid.uuid5(scryfall_namespace, name)
         return sku_uuid, None
+    
 
-    def generate_sku_uuids(self):
-        print("Computing sku_uuids...")
-
+    def generate_skuuids(self):
+        print("Computing skuuids...")
+        error_rows = []
+        
         def generate_sku_row(x):
             if pd.isna(x["scryfallId"]) or not isinstance(x["scryfallId"], str):
+                error_rows.append(x.to_dict())
+                logging.error(f"Invalid or missing Scryfall ID: {x.to_dict()}")
                 return None
 
-            sku_uuid, error = self.compute_sku(
-                x["scryfallId"], x["condition"], x["language"], x["printing"]
-            )
-            if error:
-                print(error)
-            else:
-                return sku_uuid
+            try:
+                sku_uuid, error = self.compute_sku(
+                    x["scryfallId"], x["condition"], x["language"], x["printing"]
+                )
+                if error:
+                    logging.error(f"Error computing skuuid: {error}")
+                else:
+                    return sku_uuid
+            except ValueError as err:
+                error_rows.append(x.to_dict())
+                logging.error(f"Invalid Scryfall ID: {x.to_dict()}")
+                return None
 
-        self.joined_df["sku_uuid"] = self.joined_df.apply(generate_sku_row, axis=1)
+        self.joined_df["skuuid"] = self.joined_df.apply(generate_sku_row, axis=1)
+
+        if error_rows:
+            error_df = pd.DataFrame(error_rows)
+            error_df.to_csv('errors.csv', index=False)
 
     def format_df(self):
         column_order = [
-            "sku_uuid",
+            "skuuid",
             "scryfallId",
             "name",
             "edition",
@@ -191,7 +219,6 @@ class MtgIdManager:
             "cardKingdomFoilId",
         ]
         self.joined_df = self.joined_df[column_order]
-
         return self.joined_df
 
     def save_to_csv(self, filename):
@@ -205,6 +232,34 @@ class MtgIdManager:
             for _, row in self.joined_df.iterrows():
                 f.write(json.dumps(row.to_dict(), cls=UUIDEncoder) + "\n")
         print(f"Data successfully saved to {filename}")
+
+    def save_to_bigquery(self, config):
+        from google.cloud import bigquery
+        import pandas_gbq
+
+        print("Saving data to BigQuery...")
+
+        credentials = None
+        if config.use_adc:
+            bq = bigquery.Client()
+        else:
+            from google.oauth2 import service_account
+            credentials = service_account.Credentials.from_service_account_file(
+                config.service_acc_path
+            )
+            bq = bigquery.Client(credentials=credentials, project=credentials.project_id)
+
+        try:
+            pandas_gbq.to_gbq(
+                dataframe=self.joined_df,
+                destination_table=config.bq_dest,
+                project_id=bq.project,
+                if_exists='replace',
+                credentials=credentials,
+            )
+            print(f"Data successfully saved to BigQuery: {config.bq_dest}")
+        except Exception as e:
+            print(f"Failed to save to BigQuery: {e}")
 
 
     def run_options(self):
@@ -262,7 +317,7 @@ class MtgIdManager:
         self.process_identifiers_data()
         self.process_set_data()
         self.merge_data()
-        self.generate_sku_uuids()
+        self.generate_skuuids()
         self.format_df()
 
         if config.save_csv:
